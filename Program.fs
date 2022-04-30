@@ -3,6 +3,7 @@ open Microsoft.AspNetCore.Builder
 open Microsoft.Extensions.Hosting
 open Giraffe
 open Npgsql.FSharp
+open Microsoft.AspNetCore.Http
 
 [<CLIMutable>]
 type Todo =
@@ -32,7 +33,7 @@ let mapTodo (read: RowReader) : Todo =
       CreatedAt = read.dateTime "createdAt"
       UpdatedAt = read.dateTime "updatedAt" }
 
-let getTodoList: Todo list =
+let getTodoList () : Todo list =
     connectionString
     |> Sql.connect
     |> Sql.query "SELECT * FROM todos;"
@@ -57,37 +58,103 @@ let getTodoById id : Result<Todo, string> =
     | [] -> Error TodoNotFound
     | _ -> Ok todos[0]
 
-let deleteTodo id : Result<unit, string> = 
-    let rows = 
+let deleteTodo id : Result<unit, string> =
+    let rows =
         connectionString
         |> Sql.connect
         |> Sql.query "DELETE FROM todos WHERE id = @id"
-        |> Sql.parameters [("id", Sql.uuid id)]
+        |> Sql.parameters [ ("id", Sql.uuid id) ]
         |> Sql.executeNonQuery
-    
+
     match rows with
     | 0 -> Error TodoNotFound
-    | _ -> Ok ()
+    | _ -> Ok()
 
-let handleGetTodos = 
-    setStatusCode 200 
-    >=> json getTodoList 
+let checkTodo id : Result<unit, string> =
+    let rows =
+        connectionString
+        |> Sql.connect
+        |> Sql.query "UPDATE todos SET \"isChecked\" = true WHERE id = @id"
+        |> Sql.parameters [ ("id", Sql.uuid id) ]
+        |> Sql.executeNonQuery
 
-let handleGetTodoById id =
-    let dbResult = getTodoById id
-    match dbResult with
-    | Error msg -> setStatusCode 404 >=> text msg
-    | Ok todo -> json todo
+    match rows with
+    | 0 -> Error TodoNotFound
+    | _ -> Ok()
 
-let handlePostTodo =
-    setStatusCode 201
-    >=> bindJson<NewTodo> (fun newTodo -> json (insertTodo newTodo))
+let uncheckTodo id : Result<unit, string> =
+    let rows =
+        connectionString
+        |> Sql.connect
+        |> Sql.query "UPDATE todos SET \"isChecked\" = false WHERE id = @id"
+        |> Sql.parameters [ ("id", Sql.uuid id) ]
+        |> Sql.executeNonQuery
 
-let handleDeleteTodo id =
-    let dbResult = deleteTodo id
-    match dbResult with
-    | Error msg -> setStatusCode 404 >=> text msg
-    | Ok _ -> setStatusCode 204
+    match rows with
+    | 0 -> Error TodoNotFound
+    | _ -> Ok()
+
+let handleGetTodos: HttpHandler =
+    fun (next: HttpFunc) (ctx: HttpContext) ->
+        let todoList = getTodoList ()
+        json todoList next ctx
+
+let handleGetTodoById id : HttpHandler =
+    fun (next: HttpFunc) (ctx: HttpContext) ->
+        let dbResult = getTodoById id
+
+        match dbResult with
+        | Error msg ->
+            ctx.SetStatusCode 404
+            text msg next ctx
+        | Ok todo -> json todo next ctx
+
+
+let handlePostTodo: HttpHandler =
+    fun (next: HttpFunc) (ctx: HttpContext) ->
+        task {
+            ctx.SetStatusCode 201
+            let! newTodo = ctx.BindJsonAsync<NewTodo>()
+            let todo = insertTodo newTodo
+            return! json todo next ctx
+        }
+
+let handleDeleteTodo id : HttpHandler =
+    fun (next: HttpFunc) (ctx: HttpContext) ->
+        let dbResult = deleteTodo id
+
+        match dbResult with
+        | Error msg ->
+            ctx.SetStatusCode 404
+            text msg next ctx
+        | Ok _ ->
+            ctx.SetStatusCode 204
+            next ctx
+
+let handlePostTodoCheck id : HttpHandler =
+    fun (next: HttpFunc) (ctx: HttpContext) ->
+        let dbResult = checkTodo id
+
+        match dbResult with
+        | Error msg ->
+            ctx.SetStatusCode 404
+            text msg next ctx
+        | Ok _ ->
+            ctx.SetStatusCode 204
+            next ctx
+
+let handleDeleteTodoCheck id : HttpHandler =
+    fun (next: HttpFunc) (ctx: HttpContext) ->
+        let dbResult = uncheckTodo id
+
+        match dbResult with
+        | Error msg ->
+            ctx.SetStatusCode 404
+            text msg next ctx
+        | Ok _ ->
+            ctx.SetStatusCode 204
+            next ctx
+
 
 let webApp =
     choose [ route "/todos"
@@ -96,9 +163,9 @@ let webApp =
              routef "/todos/%O" (fun id ->
                  (choose [ GET >=> handleGetTodoById id
                            DELETE >=> handleDeleteTodo id ]))
-             routef "/todos/%s/check" (fun id ->
-                 (choose [ POST >=> text "POST /todos/{id}/check"
-                           DELETE >=> text "DELETE /todos/{id}/check" ])) ]
+             routef "/todos/%O/check" (fun id ->
+                 (choose [ POST >=> handlePostTodoCheck id
+                           DELETE >=> handleDeleteTodoCheck id ])) ]
 
 let builder = WebApplication.CreateBuilder()
 builder.Services.AddGiraffe() |> ignore
