@@ -109,13 +109,15 @@ let handleGetTodoById id : HttpHandler =
             text msg next ctx
         | Ok todo -> json todo next ctx
 
-
+// TODO add validation, empty request bodies lead to todos created without
+// name currently
 let handlePostTodo: HttpHandler =
     fun (next: HttpFunc) (ctx: HttpContext) ->
         task {
-            ctx.SetStatusCode 201
             let! newTodo = ctx.BindJsonAsync<NewTodo>()
             let todo = insertTodo newTodo
+            ctx.SetStatusCode 201
+            ctx.SetHttpHeader("Location", $"{ctx.GetRequestUrl()}/{todo.Id}")
             return! json todo next ctx
         }
 
